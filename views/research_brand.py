@@ -154,49 +154,71 @@ def generate_due_diligence_report_stream(
 
 def md_to_pdf(md) -> bytes:
     """
-    Robust Markdown → PDF using built-in Helvetica (Latin-1 only)
+    Minimal “pretty” Markdown → PDF (Helvetica, Latin-1 only).
 
-    Handles:
-    • md as str / bytes / bytearray
-    • Unsupported Unicode (drops glyphs)
-    • Very long tokens that exceed cell width
-    • fpdf2 returning str / bytes / bytearray
-    Always returns *bytes* so Streamlit's download_button is happy.
+    Supports:
+    • # / ## / ### headings  → larger bold text
+    • - or * bullet lists    → • items, indented
+    • normal paragraphs      → wrapped
+    Drops unsupported Unicode and always returns bytes.
     """
-    # ── 1. Normalise to Python str ───────────────────────────────────
-    if isinstance(md, (bytes, bytearray)):
-        md = md.decode("utf-8", errors="replace")        # assume UTF-8
 
-    # ── 2. Filter to Latin-1 (Helvetica printable range) ─────────────
+    # ---------- normalise input to str -------------------------------------
+    if isinstance(md, (bytes, bytearray)):
+        md = md.decode("utf-8", errors="replace")
     md = md.encode("latin-1", "ignore").decode("latin-1")
 
-    # ── 3. Prepare PDF ───────────────────────────────────────────────
+    # ---------- set up PDF doc ---------------------------------------------
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.set_font("Helvetica", size=11)   # core font, always present
     pdf.add_page()
 
-    # chars-per-line heuristic (good enough for 11 pt Helvetica)
+    # pre-compute width → char count heuristic
     max_chars = int((pdf.w - pdf.l_margin - pdf.r_margin) /
                     pdf.get_string_width("A"))
 
-    # ── 4. Add content, wrapped safely ───────────────────────────────
-    for raw_line in md.splitlines():
+    def write_wrapped(text, indent=0):
         wrapped = textwrap.fill(
-            raw_line,
-            width=max_chars,
-            break_long_words=True,       # break URLs, long hashes, etc.
-            replace_whitespace=False,
-        )
-        pdf.multi_cell(0, 6, txt=wrapped)
+            text, width=max_chars - indent,
+            break_long_words=True, replace_whitespace=False)
+        for line in wrapped.splitlines():
+            pdf.cell(indent * 4, 6, "")         # indent
+            pdf.multi_cell(0, 6, txt=line)
 
-    # ── 5. Export & force to bytes ───────────────────────────────────
-    out = pdf.output(dest="S")           # str (Py<=3.7) or bytes/bytearray
+    # ---------- parse & render ---------------------------------------------
+    for raw in md.splitlines():
+        line = raw.rstrip()
+
+        # Headings ----------------------------------------------------------
+        if m := re.match(r"^(#{1,3})\s+(.*)", line):
+            level, title = len(m.group(1)), m.group(2)
+            size = {1: 16, 2: 14, 3: 12}[level]
+            pdf.set_font("Helvetica", style="B", size=size)
+            pdf.multi_cell(0, 8, txt=title)
+            pdf.ln(1)
+            pdf.set_font("Helvetica", size=11)   # reset
+            continue
+
+        # Bullet list -------------------------------------------------------
+        if m := re.match(r"^(\s*[-*])\s+(.*)", line):
+            pdf.cell(5, 6, "•")
+            write_wrapped(m.group(2), indent=1)
+            continue
+
+        # Blank line → vertical space --------------------------------------
+        if line.strip() == "":
+            pdf.ln(2)
+            continue
+
+        # Paragraph ---------------------------------------------------------
+        write_wrapped(line)
+
+    # ---------- output as bytes -------------------------------------------
+    out = pdf.output(dest="S")
     if isinstance(out, str):
         out = out.encode("latin-1")
     elif isinstance(out, bytearray):
         out = bytes(out)
-
     return out
 
 # -----------------------------------------------------------------------------
