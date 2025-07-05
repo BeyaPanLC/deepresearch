@@ -5,7 +5,8 @@ from openai import OpenAI, OpenAIError
 import time, concurrent.futures
 from fpdf import FPDF
 import httpx
-import textwrap                  
+import textwrap
+import re                  
 
 TOTAL_EST_SECS = 30 * 60            # show progress for up to 30 minutes
 REFRESH_EVERY  = 0.5   
