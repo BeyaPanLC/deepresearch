@@ -153,49 +153,73 @@ def generate_due_diligence_report_stream(
 
 
 def md_to_pdf(md) -> bytes:
-    # 1. normalise input ----------------------------------------------
+    """
+    Robust Markdown → PDF
+    • Built-in Helvetica (Latin-1); drops unsupported glyphs
+    • #/##/### headings → larger bold text
+    • - or * bullets     → indented • items
+    • Paragraphs wrapped to page width
+    • Accepts str/bytes/bytearray, always returns *bytes* (for Streamlit)
+    """
+
+    # 1 ── normalise input ────────────────────────────────────────────
     if isinstance(md, (bytes, bytearray)):
         md = md.decode("utf-8", errors="replace")
     md = md.encode("latin-1", "ignore").decode("latin-1")
 
-    # 2. PDF setup -----------------------------------------------------
+    # 2 ── PDF setup ─────────────────────────────────────────────────
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.set_font("Helvetica", size=11)                 # font FIRST
+    pdf.set_font("Helvetica", size=11)          # select font *first*
     pdf.add_page()
 
     char_w    = pdf.get_string_width("A") or 0.5
     max_chars = int((pdf.w - pdf.l_margin - pdf.r_margin) / char_w)
 
-    # 3. helpers -------------------------------------------------------
-    def write_wrapped(text, indent=0):
+    def write_wrapped(text: str, indent: int = 0) -> None:
         wrapped = textwrap.fill(
-            text, width=max_chars - indent,
-            break_long_words=True, replace_whitespace=False)
+            text,
+            width=max_chars - indent,
+            break_long_words=True,
+            replace_whitespace=False,
+        )
         for ln in wrapped.splitlines():
-            pdf.cell(indent * 4, 6, "")    # indent
+            if indent:
+                pdf.cell(indent * 4, 6, "")     # left indent
             pdf.multi_cell(0, 6, txt=ln)
 
-    # 4. render --------------------------------------------------------
+    # 3 ── parse & render line-by-line ───────────────────────────────
     for raw in md.splitlines():
         line = raw.rstrip()
 
-        if m := re.match(r"^(#{1,3})\s+(.*)", line):   # headings
-            lvl, title = len(m[1]), m[2]
-            size = {1:16, 2:14, 3:12}[lvl]
+        # Headings
+        match = re.match(r"^(#{1,3})\s+(.*)", line)
+        if match:
+            level  = len(match.group(1))
+            title  = match.group(2)
+            size   = {1: 16, 2: 14, 3: 12}[level]
             pdf.set_font("Helvetica", style="B", size=size)
             pdf.multi_cell(0, 8, txt=title)
             pdf.ln(1)
             pdf.set_font("Helvetica", size=11)
-        elif m := re.match(r"^(\s*[-*])\s+(.*)", line):  # bullets
-            pdf.cell(5, 6, "•")
-            write_wrapped(m[2], indent=1)
-        elif line.strip() == "":                        # blank line
-            pdf.ln(2)
-        else:                                           # paragraph
-            write_wrapped(line)
+            continue
 
-    # 5. output --------------------------------------------------------
+        # Bullet list
+        match = re.match(r"^\s*[-*]\s+(.*)", line)
+        if match:
+            pdf.cell(5, 6, "•")
+            write_wrapped(match.group(1), indent=1)
+            continue
+
+        # Blank line
+        if line.strip() == "":
+            pdf.ln(2)
+            continue
+
+        # Normal paragraph
+        write_wrapped(line)
+
+    # 4 ── export as bytes ───────────────────────────────────────────
     out = pdf.output(dest="S")
     if isinstance(out, str):
         out = out.encode("latin-1")
