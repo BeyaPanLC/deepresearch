@@ -152,81 +152,103 @@ def generate_due_diligence_report_stream(
 
 
 
-
 def md_to_pdf(md) -> bytes:
     """
-    Robust Markdown → PDF
-    • Built-in Helvetica (Latin-1); drops unsupported glyphs
-    • #/##/### headings → larger bold text
-    • - or * bullets     → indented • items
-    • Paragraphs wrapped to page width
-    • Accepts str/bytes/bytearray, always returns *bytes* (for Streamlit)
+    Safe Markdown → PsDF exporter (Helvetica, Latin‑1 only).
+
+    • Accepts str / bytes / bytearray.
+    • Strips unsupported Unicode.
+    • Handles headings (# ## ###), bullet lists (- or *) and paragraphs.
+    • Splits any over‑wide word so fpdf2 never raises
+      “Not enough horizontal space to render a single character”.
+    • Always returns *bytes* (required by st.download_button).
     """
 
-    # 1 ── normalise input ────────────────────────────────────────────
+    # ── 1. normalise input to a Latin‑1 str ──────────────────────────────
     if isinstance(md, (bytes, bytearray)):
         md = md.decode("utf-8", errors="replace")
     md = md.encode("latin-1", "ignore").decode("latin-1")
 
-    # 2 ── PDF setup ─────────────────────────────────────────────────
+    # ── 2. set up PDF document ────────────────────────────────────────────
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.set_font("Helvetica", size=11)          # select font *first*
+    pdf.set_font("Helvetica", size=11)        # choose font *before* metrics
     pdf.add_page()
 
-    char_w    = pdf.get_string_width("A") or 0.5
-    max_chars = int((pdf.w - pdf.l_margin - pdf.r_margin) / char_w)
+    max_width = pdf.w - pdf.l_margin - pdf.r_margin   # printable width (pt)
 
-    def write_wrapped(text: str, indent: int = 0) -> None:
-        wrapped = textwrap.fill(
-            text,
-            width=max_chars - indent,
-            break_long_words=True,
+    # Helper: split one ultra‑long token into safe chunks
+    def break_long_word(word: str):
+        parts, chunk = [], ""
+        for ch in word:
+            if pdf.get_string_width(chunk + ch) > max_width:
+                if chunk:
+                    parts.append(chunk)
+                chunk = ch
+            else:
+                chunk += ch
+        if chunk:
+            parts.append(chunk)
+        return parts
+
+    # Helper: wrap and write a line with optional indent
+    def write_wrapped(text: str, indent: int = 0):
+        safe_tokens = []
+        for tok in text.split():
+            if pdf.get_string_width(tok) > max_width:
+                safe_tokens.extend(break_long_word(tok))
+            else:
+                safe_tokens.append(tok)
+        safe_line = " ".join(safe_tokens)
+
+        # width=10000 ⇒ rely on our manual word‑splits, not textwrap’s
+        for ln in textwrap.fill(
+            safe_line,
+            width=10000,
+            break_long_words=False,
             replace_whitespace=False,
-        )
-        for ln in wrapped.splitlines():
+        ).splitlines():
             if indent:
-                pdf.cell(indent * 4, 6, "")     # left indent
+                pdf.cell(indent * 4, 6, "")   # horizontal indent
             pdf.multi_cell(0, 6, txt=ln)
 
-    # 3 ── parse & render line-by-line ───────────────────────────────
+    # ── 3. simple Markdown renderer ──────────────────────────────────────
     for raw in md.splitlines():
         line = raw.rstrip()
 
-        # Headings
-        match = re.match(r"^(#{1,3})\s+(.*)", line)
-        if match:
-            level  = len(match.group(1))
-            title  = match.group(2)
-            size   = {1: 16, 2: 14, 3: 12}[level]
-            pdf.set_font("Helvetica", style="B", size=size)
+        # Headings (#, ##, ###)
+        h = re.match(r"^(#{1,3})\s+(.*)$", line)
+        if h:
+            lvl, title = len(h.group(1)), h.group(2)
+            pdf.set_font("Helvetica", style="B", size={1:16, 2:14, 3:12}[lvl])
             pdf.multi_cell(0, 8, txt=title)
             pdf.ln(1)
             pdf.set_font("Helvetica", size=11)
             continue
 
-        # Bullet list
-        match = re.match(r"^\s*[-*]\s+(.*)", line)
-        if match:
-            pdf.cell(5, 6, "•")
-            write_wrapped(match.group(1), indent=1)
+        # Bullets (- or *)
+        b = re.match(r"^\s*[-*]\s+(.*)$", line)
+        if b:
+            pdf.cell(5, 6, "-")               # ASCII bullet to stay Latin‑1
+            write_wrapped(b.group(1), indent=1)
             continue
 
-        # Blank line
-        if line.strip() == "":
+        # Blank line → vertical space
+        if not line.strip():
             pdf.ln(2)
             continue
 
-        # Normal paragraph
+        # Paragraph
         write_wrapped(line)
 
-    # 4 ── export as bytes ───────────────────────────────────────────
+    # ── 4. export & ensure bytes ─────────────────────────────────────────
     out = pdf.output(dest="S")
     if isinstance(out, str):
         out = out.encode("latin-1")
     elif isinstance(out, bytearray):
         out = bytes(out)
     return out
+
 
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="Brand Research", layout="wide")
