@@ -154,34 +154,37 @@ def generate_due_diligence_report_stream(
 
 def md_to_pdf(md) -> bytes:
     """
-    Safe Markdown → PsDF exporter (Helvetica, Latin‑1 only).
+    Robust Markdown → PDF (Helvetica, Latin-1 only).
 
     • Accepts str / bytes / bytearray.
-    • Strips unsupported Unicode.
-    • Handles headings (# ## ###), bullet lists (- or *) and paragraphs.
-    • Splits any over‑wide word so fpdf2 never raises
-      “Not enough horizontal space to render a single character”.
-    • Always returns *bytes* (required by st.download_button).
+    • All non-Latin-1 (unsupported Unicode) characters will be stripped from the output (they are not transliterated or replaced).
+    • Supports #/##/### headings, -* bullets, blank lines, paragraphs.
+    • Hard-splits any over-wide word so fpdf2 never fails.
+    • Always returns bytes for Streamlit download_button.
     """
 
-    # ── 1. normalise input to a Latin‑1 str ──────────────────────────────
+    # ── 1. normalise to Latin-1 str (removes unsupported Unicode chars) ──
     if isinstance(md, (bytes, bytearray)):
-        md = md.decode("utf-8", errors="replace")
+        try:
+            md = md.decode("utf-8")
+        except UnicodeDecodeError:
+            st.warning("Some characters could not be decoded from UTF-8 and were replaced. These will be omitted from the PDF.")
+            md = md.decode("utf-8", errors="replace")
     md = md.encode("latin-1", "ignore").decode("latin-1")
 
-    # ── 2. set up PDF document ────────────────────────────────────────────
+    # ── 2. base PDF setup ────────────────────────────────────────────────
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.set_font("Helvetica", size=11)        # choose font *before* metrics
+    pdf.set_font("Helvetica", size=11)       # font FIRST for width metrics
     pdf.add_page()
 
-    max_width = pdf.w - pdf.l_margin - pdf.r_margin   # printable width (pt)
+    full_width = pdf.w - pdf.l_margin - pdf.r_margin  # printable width (pt)
 
-    # Helper: split one ultra‑long token into safe chunks
-    def break_long_word(word: str):
+    # helper: split one very-long token into <full_width> chunks
+    def split_long_word(word: str, col_width: float) -> List[str]:
         parts, chunk = [], ""
         for ch in word:
-            if pdf.get_string_width(chunk + ch) > max_width:
+            if pdf.get_string_width(chunk + ch) > col_width:
                 if chunk:
                     parts.append(chunk)
                 chunk = ch
@@ -190,63 +193,67 @@ def md_to_pdf(md) -> bytes:
         if chunk:
             parts.append(chunk)
         return parts
-
-    # Helper: wrap and write a line with optional indent
-    def write_wrapped(text: str, indent: int = 0):
-        safe_tokens = []
-        for tok in text.split():
-            if pdf.get_string_width(tok) > max_width:
-                safe_tokens.extend(break_long_word(tok))
+    def write_wrapped(text: str, indent_level: int = 0):
+        indent_pt  = indent_level * 4
+        col_width  = full_width - indent_pt
+        # Cache for token widths
+        width_cache = {}
+        # 1) break every token that exceeds the column width
+        safe_parts = []
+        for token in text.split():
+            if token in width_cache:
+                token_width = width_cache[token]
             else:
-                safe_tokens.append(tok)
-        safe_line = " ".join(safe_tokens)
+                token_width = pdf.get_string_width(token)
+                width_cache[token] = token_width
+            if token_width > col_width:
+                safe_parts.extend(split_long_word(token, col_width))
+            else:
+                safe_parts.append(token)
+        safe_line = " ".join(safe_parts)
+        # 2) set cursor to indent & write within the column
+        pdf.set_x(pdf.l_margin + indent_pt)
+        pdf.multi_cell(col_width, 6, txt=safe_line)
 
-        # width=10000 ⇒ rely on our manual word‑splits, not textwrap’s
-        for ln in textwrap.fill(
-            safe_line,
-            width=10000,
-            break_long_words=False,
-            replace_whitespace=False,
-        ).splitlines():
-            if indent:
-                pdf.cell(indent * 4, 6, "")   # horizontal indent
-            pdf.multi_cell(0, 6, txt=ln)
-
-    # ── 3. simple Markdown renderer ──────────────────────────────────────
+    # ── 3. very-light Markdown renderer ─────────────────────────────────
     for raw in md.splitlines():
         line = raw.rstrip()
 
-        # Headings (#, ##, ###)
+        # Headings -------------------------------------------------------
         h = re.match(r"^(#{1,3})\s+(.*)$", line)
         if h:
-            lvl, title = len(h.group(1)), h.group(2)
-            pdf.set_font("Helvetica", style="B", size={1:16, 2:14, 3:12}[lvl])
+            level, title = len(h.group(1)), h.group(2)
+            pdf.set_font("Helvetica", style="B", size={1:16, 2:14, 3:12}[level])
             pdf.multi_cell(0, 8, txt=title)
             pdf.ln(1)
             pdf.set_font("Helvetica", size=11)
             continue
 
-        # Bullets (- or *)
+        # Bullets --------------------------------------------------------
         b = re.match(r"^\s*[-*]\s+(.*)$", line)
         if b:
-            pdf.cell(5, 6, "-")               # ASCII bullet to stay Latin‑1
-            write_wrapped(b.group(1), indent=1)
+            pdf.set_x(pdf.l_margin)        # reset to left margin
+            pdf.cell(5, 6, "•")            # bullet mark
+            write_wrapped(b.group(1), indent_level=1)
             continue
 
-        # Blank line → vertical space
-        if not line.strip():
-            pdf.ln(2)
+        # Blank line -----------------------------------------------------
+        if line.strip() == "":
+            pdf.ln(4)
             continue
 
-        # Paragraph
+        # Paragraphs -----------------------------------------------------
         write_wrapped(line)
 
-    # ── 4. export & ensure bytes ─────────────────────────────────────────
     out = pdf.output(dest="S")
-    if isinstance(out, str):
-        out = out.encode("latin-1")
-    elif isinstance(out, bytearray):
+    if isinstance(out, bytearray):
         out = bytes(out)
+    elif isinstance(out, bytes):
+        pass  # already bytes, do nothing
+    elif isinstance(out, str):
+        out = out.encode("latin-1")
+    else:
+        raise TypeError("Unexpected output type from FPDF: {}. Expected bytes, str, or bytearray.".format(type(out)))
     return out
 
 
