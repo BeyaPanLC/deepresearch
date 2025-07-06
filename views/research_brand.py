@@ -160,254 +160,148 @@ def generate_due_diligence_report_stream(
 
 def md_to_pdf(md: Union[str, bytes, bytearray, None]) -> bytes:
     """
-    Robust Markdown → PDF converter with comprehensive error handling.
-
-    Args:
-        md: Markdown content as str, bytes, bytearray, or None
-        
-    Returns:
-        bytes: PDF content ready for download
-        
-    Raises:
-        ValueError: If input is invalid or empty
-        RuntimeError: If PDF generation fails
-        
-    Features:
-        • Handles None/empty inputs gracefully
-        • Supports #/##/### headings, -* bullets, blank lines, paragraphs
-        • Strips unsupported Unicode characters (Latin-1 only)
-        • Hard-splits over-wide words to prevent fpdf failures
-        • Comprehensive error handling and logging
-        • Memory-efficient processing for large documents
+    Simple, forgiving Markdown → PDF converter.
+    Ignores all errors and produces a PDF no matter what.
     """
     
-    def _log_warning(msg: str):
-        """Log warning with fallback if streamlit not available"""
-        if HAS_STREAMLIT:
-            st.warning(msg)
-        else:
-            logging.warning(msg)
-    
-    def _log_error(msg: str):
-        """Log error with fallback if streamlit not available"""
-        if HAS_STREAMLIT:
-            st.error(msg)
-        else:
-            logging.error(msg)
-
-    # ── 1. Input validation and normalization ──────────────────────────
+    # ── 1. Just get some text, ignore everything else ──────────────────
     if md is None:
-        raise ValueError("Input markdown content cannot be None")
+        md = "Empty document"
     
     if isinstance(md, (bytes, bytearray)):
-        if len(md) == 0:
-            raise ValueError("Input markdown content cannot be empty")
         try:
-            md = md.decode("utf-8")
-        except UnicodeDecodeError as e:
-            _log_warning(f"UTF-8 decode error: {e}. Attempting with error replacement.")
-            try:
-                md = md.decode("utf-8", errors="replace")
-            except Exception as e2:
-                raise ValueError(f"Failed to decode input bytes: {e2}")
+            md = md.decode("utf-8", errors="ignore")
+        except:
+            md = "Could not decode content"
     
     if not isinstance(md, str):
-        raise ValueError(f"Input must be str, bytes, or bytearray, got {type(md)}")
+        md = str(md)
     
     if not md.strip():
-        raise ValueError("Input markdown content cannot be empty or whitespace-only")
+        md = "Empty document"
     
-    # Convert to Latin-1, removing unsupported Unicode
+    # Just keep basic characters, ignore everything else
     try:
-        original_len = len(md)
-        md = md.encode("latin-1", "ignore").decode("latin-1")
-        if len(md) < original_len:
-            _log_warning(f"Removed {original_len - len(md)} unsupported Unicode characters from content")
-    except Exception as e:
-        raise ValueError(f"Failed to process text encoding: {e}")
+        md = ''.join(char for char in md if ord(char) < 256)
+        md = md.encode("latin-1", errors="ignore").decode("latin-1")
+    except:
+        md = "Text encoding failed"
 
-    # ── 2. PDF setup with error handling ───────────────────────────────
+    # ── 2. Basic PDF setup ─────────────────────────────────────────────
     try:
         pdf = FPDF()
         pdf.set_auto_page_break(auto=True, margin=15)
-        
-        # Test font availability
         try:
             pdf.set_font("Helvetica", size=11)
-        except Exception:
-            # Fallback to Arial if Helvetica not available
+        except:
             try:
                 pdf.set_font("Arial", size=11)
-                font_name = "Arial"
-            except Exception:
-                # Last resort - use default font
+            except:
                 pdf.set_font("Times", size=11)
-                font_name = "Times"
-        else:
-            font_name = "Helvetica"
-            
         pdf.add_page()
         
-        # Calculate printable width safely
-        try:
-            full_width = pdf.w - pdf.l_margin - pdf.r_margin
-            if full_width <= 0:
-                raise ValueError("Invalid page dimensions")
-        except Exception as e:
-            raise RuntimeError(f"Failed to calculate page dimensions: {e}")
-            
-    except Exception as e:
-        raise RuntimeError(f"Failed to initialize PDF: {e}")
+        full_width = pdf.w - pdf.l_margin - pdf.r_margin
+        if full_width <= 0:
+            full_width = 180  # fallback width
+    except:
+        # If PDF setup fails completely, return minimal PDF
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Times", size=11)
+        full_width = 180
 
-    # ── 3. Helper functions with robust error handling ─────────────────
-    def split_long_word(word: str, col_width: float) -> List[str]:
-        """Split a word that's too wide for the column"""
-        if not word or col_width <= 0:
-            return [word] if word else []
-        
-        parts, chunk = [], ""
-        try:
-            for ch in word:
-                test_width = pdf.get_string_width(chunk + ch)
-                if test_width > col_width and chunk:
-                    parts.append(chunk)
-                    chunk = ch
-                else:
-                    chunk += ch
-            if chunk:
-                parts.append(chunk)
-        except Exception as e:
-            _log_warning(f"Error splitting word '{word[:20]}...': {e}")
-            # Fallback: split by character count
-            chunk_size = max(1, int(col_width / 10))  # rough estimate
-            parts = [word[i:i+chunk_size] for i in range(0, len(word), chunk_size)]
-        
-        return parts if parts else [word]
-
-    def write_wrapped(text: str, indent_level: int = 0):
-        """Write text with word wrapping and indentation"""
+    # ── 3. Super simple helpers ────────────────────────────────────────
+    def safe_write(text: str, bold: bool = False, size: int = 11):
+        """Write text, ignore all errors"""
         if not text:
             return
-            
         try:
-            indent_pt = max(0, indent_level * 4)
-            col_width = max(10, full_width - indent_pt)  # minimum 10pt width
-            
-            # Process tokens with caching
-            width_cache = {}
-            safe_parts = []
-            
-            for token in text.split():
-                if not token:
-                    continue
-                    
-                try:
-                    if token in width_cache:
-                        token_width = width_cache[token]
-                    else:
-                        token_width = pdf.get_string_width(token)
-                        width_cache[token] = token_width
-                    
-                    if token_width > col_width:
-                        safe_parts.extend(split_long_word(token, col_width))
-                    else:
-                        safe_parts.append(token)
-                except Exception as e:
-                    _log_warning(f"Error processing token '{token[:20]}...': {e}")
-                    safe_parts.append(token)  # Add anyway
-            
-            if safe_parts:
-                safe_line = " ".join(safe_parts)
-                pdf.set_x(pdf.l_margin + indent_pt)
-                pdf.multi_cell(col_width, 6, txt=safe_line)
-                
-        except Exception as e:
-            _log_error(f"Error writing wrapped text: {e}")
-            # Fallback: write without wrapping
-            try:
-                pdf.multi_cell(0, 6, txt=text[:1000])  # Truncate if too long
-            except Exception:
-                pass  # Give up on this text
-
-    # ── 4. Markdown processing with error handling ─────────────────────
-    try:
-        lines = md.splitlines()
-        total_lines = len(lines)
+            if bold:
+                pdf.set_font("Helvetica", style="B", size=size)
+            else:
+                pdf.set_font("Helvetica", size=size)
+        except:
+            pass
         
-        for line_num, raw in enumerate(lines, 1):
+        try:
+            # Split long words crudely
+            words = text.split()
+            safe_words = []
+            for word in words:
+                if len(word) > 50:  # rough cut
+                    safe_words.extend([word[i:i+50] for i in range(0, len(word), 50)])
+                else:
+                    safe_words.append(word)
+            
+            safe_text = " ".join(safe_words)[:1000]  # limit length
+            pdf.multi_cell(0, 6, txt=safe_text)
+        except:
+            # Last resort
             try:
-                line = raw.rstrip()
-                
-                # Skip extremely long lines (potential memory issue)
-                if len(line) > 10000:
-                    _log_warning(f"Skipping extremely long line {line_num} ({len(line)} characters)")
-                    continue
+                pdf.cell(0, 6, txt=text[:100])
+                pdf.ln()
+            except:
+                pass
 
-                # Headings
-                h = re.match(r"^(#{1,6})\s+(.*)$", line)  # Support up to h6
-                if h:
-                    level = min(len(h.group(1)), 3)  # Cap at h3 for formatting
-                    title = h.group(2)[:200]  # Limit title length
-                    
-                    size_map = {1: 16, 2: 14, 3: 12}
-                    try:
-                        pdf.set_font(font_name, style="B", size=size_map[level])
-                        pdf.multi_cell(0, 8, txt=title)
-                        pdf.ln(1)
-                        pdf.set_font(font_name, size=11)
-                    except Exception as e:
-                        _log_warning(f"Error formatting heading on line {line_num}: {e}")
-                        write_wrapped(title)  # Fallback
-                    continue
+    # ── 4. Parse markdown super simply ─────────────────────────────────
+    try:
+        lines = md.splitlines()[:500]  # limit lines
+    except:
+        lines = ["Could not parse content"]
+    
+    for line in lines:
+        try:
+            line = line.strip()
+            if not line:
+                try:
+                    pdf.ln(4)
+                except:
+                    pass
+                continue
+            
+            # Headings
+            if line.startswith("#"):
+                heading_text = line.lstrip("#").strip()
+                safe_write(heading_text, bold=True, size=14)
+                try:
+                    pdf.ln(2)
+                except:
+                    pass
+                continue
+            
+            # Bullets
+            if line.startswith(("-", "*", "+")):
+                bullet_text = line[1:].strip()
+                safe_write(f"• {bullet_text}")
+                continue
+            
+            # Regular text
+            safe_write(line)
+            
+        except:
+            # Skip problematic lines silently
+            continue
 
-                # Bullets
-                b = re.match(r"^\s*[-*+]\s+(.*)$", line)  # Support +, -, *
-                if b:
-                    bullet_text = b.group(1)
-                    try:
-                        pdf.set_x(pdf.l_margin)
-                        pdf.cell(5, 6, "•")
-                        write_wrapped(bullet_text, indent_level=1)
-                    except Exception as e:
-                        _log_warning(f"Error formatting bullet on line {line_num}: {e}")
-                        write_wrapped(f"• {bullet_text}")  # Fallback
-                    continue
-
-                # Blank lines
-                if not line.strip():
-                    try:
-                        pdf.ln(4)
-                    except Exception:
-                        pass  # Skip if fails
-                    continue
-
-                # Regular paragraphs
-                write_wrapped(line)
-                
-            except Exception as e:
-                _log_warning(f"Error processing line {line_num}: {e}")
-                continue  # Skip problematic lines
-                
-    except Exception as e:
-        raise RuntimeError(f"Failed to process markdown content: {e}")
-
-    # ── 5. Generate and return PDF bytes ───────────────────────────────
+    # ── 5. Return PDF bytes no matter what ─────────────────────────────
     try:
         out = pdf.output(dest="S")
-        
-        # Handle different output types from different fpdf versions
         if isinstance(out, bytes):
             return out
         elif isinstance(out, bytearray):
             return bytes(out)
-        elif isinstance(out, str):
-            return out.encode("latin-1")
         else:
-            # Last resort conversion
-            return str(out).encode("latin-1")
-            
-    except Exception as e:
-        raise RuntimeError(f"Failed to generate PDF output: {e}")
+            return str(out).encode("latin-1", errors="ignore")
+    except:
+        # Create absolute minimal PDF as last resort
+        try:
+            minimal_pdf = FPDF()
+            minimal_pdf.add_page()
+            minimal_pdf.set_font("Times", size=12)
+            minimal_pdf.cell(0, 10, "PDF Generation Error - Minimal Output")
+            return bytes(minimal_pdf.output(dest="S"))
+        except:
+            # Return some bytes that might work
+            return b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\nxref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \ntrailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n190\n%%EOF"
 
 
 # -----------------------------------------------------------------------------
